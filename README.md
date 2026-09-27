@@ -6,3 +6,7 @@
  like candidate_pairs_stage1c.parquet file ,,, 
 
 Ye current blocking ka output hai. Is file ko download karke matching model ke input ke roop mein use karo. Isse modify mat karna.
+
+
+
+Baki for every and more information guideline and update uske liye handoff file ko check karo
