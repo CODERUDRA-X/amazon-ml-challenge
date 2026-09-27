@@ -1,46 +1,46 @@
 # TEAM HANDOFF — Amazon ML Challenge 2026
 
-# TEAM HANDOFF
 
-Ye document team ke dono members ke liye hai. Isme current progress, problem, aur har member ka kaam diya gaya hai. Kaam start karne se pehle is file ko poora read kar lena.
+Ye document team ke dono members ke liye hai. Isme current progress, problem, aur har member ka kaam diya gaya hai & Kaam start karne se pehle is file ko poora read kar lena.
 
-Common resources:
+& Common resources ye sab hai ok:
 
-Complete dataset, official problem statement PDF, official guidelines PDF aur baaki resources Drive folder mein diye gaye hain.
+Complete dataset, official problem statement PDF, official guidelines PDF aur baaki resources Drive folder mein dete jaayenge
 
 Drive:
 https://drive.google.com/drive/folders/1zJh76qw0HZB2LIG5m_7LySk7A6-Jgr-H?usp=drive_link
 
 
-Member 1 — Matching Model
+Member 1 — , Matching Model > 
+> 2 PM tak first usable matching model + validation F0.5 + threshold + prediction code de do.
 
-Tumhara kaam candidate pairs ke upar matching model banana hai.
+Tumhara kaam candidate pairs ke upar matching model banana hai &
 
-candidate_pairs_stage1c.parquet current blocking stage ka output hai. Is file mein possible S1 → S2/S3 candidate pairs hain. Is file ko matching model ke input ke roop mein use karna hai. Blocking dobara karne ki zarurat nahi hai.
+candidate_pairs_stage1c.parquet ye current blocking stage ka output hai & is file mein possible S1 → S2/S3 candidate pairs hain. Is file ko matching model ke input ke roop mein use karna hai aur Blocking dobara karne ki zarurat nahi hai.
 
-Is file ko modify nahi karna hai.
+++ Is file ko modify nahi karna hai.**
 
-Use candidate_pairs_stage1c.parquet ke saath train_source1.tsv, train_source2.tsv, train_source3.tsv aur train_ground_truth.tsv.
+and Use candidate_pairs_stage1c.parquet ke saath train_source1.tsv, train_source2.tsv, train_source3.tsv aur train_ground_truth.tsv.
 
-Tumhara goal pair features banana, positive aur hard-negative pairs prepare karna, matching model train karna aur Macro F0.5 ke according threshold tune karna hai.
+so Tumhara goal pair features banana, positive aur hard-negative pairs prepare karna, matching model train karna aur Macro F0.5 ke according threshold tune karna hai.
 
-Important: ek S1 entity ke zero, one ya multiple correct matches ho sakte hain. Sirf top-1 match assume nahi karna hai.
-
-
-Member 2 — Blocking Improvement
-
-Tumhara kaam current blocking strategy ko improve karna hai.
-
-Current blocker ka recall lagbhag 60% hai. Missed GT links mein se bahut saare existing blocking keys share karte hain, lekin bade blocks ko current caps ki wajah se skip kiya ja raha hai.
-
-Tumhe better blocking strategy test karni hai, especially composite ya alternative blocking methods, aur recall ko improve karna hai bina candidate pairs ko bahut zyada badhaye.
-
-Har experiment ke liye blocking recall, candidate count aur runtime note karna hai.
-
-Candidate file banane ke alawa submission/output files ke liye validation code bhi ready karna hai.
+aur ek baat Important: ek S1 entity ke zero, one ya multiple correct matches ho sakte hain. so Sirf top-1 match assume nahi karna hai.
 
 
-Important:
+Member 2 — < Blocking Improvement >
+
+> 1:30 PM tak improved blocking strategy + recall + candidate count + runtime de do. Focus recall improve karne par hai, candidate explosion nahi.
+
+Tumhara kaam current blocking strategy ko improve karna hai.....
+
+mtlb Current blocker ka recall lagbhag 60% hai. Missed GT links mein se bahut saare existing blocking keys share karte hain, lekin bade blocks ko current caps ki wajah se skip kiya ja raha hai.
+
+Tumhe better blocking strategy test karni hai, especially composite ya alternative blocking methods, aur recall ko improve karna hai bina candidate pairs ko bahut zyada badhaye....//
+
+aur Har experiment ke liye blocking recall, candidate count aur runtime note karna hai.****    .................. aur Candidate file banane ke alawa submission/output files ke liye validation code bhi ready karna hai.
+
+
+aur ek Important chiz:
 
 candidate_pairs_stage1c.parquet sirf Member 1 ke matching-model work ke liye current benchmark candidate set hai.
 
@@ -48,24 +48,26 @@ Member 2 ka main kaam new blocking strategy banana hai. Isliye woh current parqu
 
 Final candidate set baad mein improved blocking ke basis par generate hoga.
 
-Shreyansh final integration karega aur dono members ke kaam ko combine karega.
+mai final integration karega aur dono members ke kaam ko combine karega.
+
+> 2 PM ke baad main dono outputs integrate karke final pipeline, test prediction aur submission handle karunga.
 
 ====
 ====
 ====
 
 
-## 1. What is the problem?
+## 1. as u know ki What is the problem?
 
-We have to solve **Business Entity Resolution**.
+so We have to solve **Business Entity Resolution**.
 
-There are 3 data sources:
+where there are 3 data sources:
 
 - **Source 1 (S1):** reference entities
 - **Source 2 (S2):** noisy business records
 - **Source 3 (S3):** noisy business records
 
-For each S1 entity, the correct answer can be:
+& For each S1 entity, the correct answer can be:
 
 - **no match**
 - **one match**
