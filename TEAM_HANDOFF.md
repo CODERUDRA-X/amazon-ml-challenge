@@ -1,5 +1,60 @@
 # TEAM HANDOFF — Amazon ML Challenge 2026
 
+# TEAM HANDOFF
+
+Ye document team ke dono members ke liye hai. Isme current progress, problem, aur har member ka kaam diya gaya hai. Kaam start karne se pehle is file ko poora read kar lena.
+
+Common resources:
+
+Complete dataset, official problem statement PDF, official guidelines PDF aur baaki resources Drive folder mein diye gaye hain.
+
+Drive:
+https://drive.google.com/drive/folders/1zJh76qw0HZB2LIG5m_7LySk7A6-Jgr-H?usp=drive_link
+
+
+Member 1 — Matching Model
+
+Tumhara kaam candidate pairs ke upar matching model banana hai.
+
+candidate_pairs_stage1c.parquet current blocking stage ka output hai. Is file mein possible S1 → S2/S3 candidate pairs hain. Is file ko matching model ke input ke roop mein use karna hai. Blocking dobara karne ki zarurat nahi hai.
+
+Is file ko modify nahi karna hai.
+
+Use candidate_pairs_stage1c.parquet ke saath train_source1.tsv, train_source2.tsv, train_source3.tsv aur train_ground_truth.tsv.
+
+Tumhara goal pair features banana, positive aur hard-negative pairs prepare karna, matching model train karna aur Macro F0.5 ke according threshold tune karna hai.
+
+Important: ek S1 entity ke zero, one ya multiple correct matches ho sakte hain. Sirf top-1 match assume nahi karna hai.
+
+
+Member 2 — Blocking Improvement
+
+Tumhara kaam current blocking strategy ko improve karna hai.
+
+Current blocker ka recall lagbhag 60% hai. Missed GT links mein se bahut saare existing blocking keys share karte hain, lekin bade blocks ko current caps ki wajah se skip kiya ja raha hai.
+
+Tumhe better blocking strategy test karni hai, especially composite ya alternative blocking methods, aur recall ko improve karna hai bina candidate pairs ko bahut zyada badhaye.
+
+Har experiment ke liye blocking recall, candidate count aur runtime note karna hai.
+
+Candidate file banane ke alawa submission/output files ke liye validation code bhi ready karna hai.
+
+
+Important:
+
+candidate_pairs_stage1c.parquet sirf Member 1 ke matching-model work ke liye current benchmark candidate set hai.
+
+Member 2 ka main kaam new blocking strategy banana hai. Isliye woh current parquet ko final candidate set nahi samjhega.
+
+Final candidate set baad mein improved blocking ke basis par generate hoga.
+
+Shreyansh final integration karega aur dono members ke kaam ko combine karega.
+
+====
+====
+====
+
+
 ## 1. What is the problem?
 
 We have to solve **Business Entity Resolution**.
