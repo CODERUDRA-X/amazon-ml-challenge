@@ -1,0 +1,421 @@
+import pandas as pd
+import numpy as np
+import gc
+import time
+import re
+import os
+import jellyfish
+import joblib
+from rapidfuzz import fuzz
+
+print("=" * 70)
+print("FINAL INFERENCE — TEST BLOCKING + MATCHING + SUBMISSION")
+print("=" * 70)
+start_time = time.time()
+
+data_dir = '/kaggle/input/datasets/coderudrax/tsv-data'
+out_dir = "/kaggle/working/output"
+os.makedirs(out_dir, exist_ok=True)
+
+MAX_DIRECT_PAIRS_PER_KEY = 20_000
+MAX_REFINED_PAIRS_PER_KEY = 20_000
+HARD_CAP_PER_S1 = 150
+PROB_THRESHOLD = 0.65   # adjustable
+
+# =================================================================
+# 1. LOAD & PREP — IDENTICAL to Stage 1F, no country filtering
+#    (France flows through untouched — it's just another string value)
+# =================================================================
+def load_and_prep(filename, nrows=None):
+    print(f"Loading {filename}...")
+    df = pd.read_csv(f"{data_dir}/{filename}", sep="\t",
+                      usecols=["entity_id", "business_name", "business_address", "country"],
+                      dtype=str, nrows=nrows).fillna("")
+
+    df["addr_pref"] = df["business_address"].str.replace(r"[^a-zA-Z0-9]", "", regex=True).str[:4].str.lower()
+    name = df["business_name"].str.lower().str.replace(r"[^a-z0-9\s]", " ", regex=True).str.replace(r"\s+", " ", regex=True).str.strip()
+    tokens = name.str.split()
+
+    df["key_name1"] = tokens.str[0].fillna("")
+    df["key_name2"] = tokens.str[:2].str.join(" ")
+    df["key_postal"] = df["business_address"].str.extract(r"(\d{5,6})", expand=False).fillna("").astype(str)
+    # NOTE: country is normalized (lower/strip) only for KEY MATCHING purposes.
+    # It is NEVER filtered to a fixed set — France flows through exactly like US/India.
+    df["country"] = df["country"].str.lower().str.strip()
+    df["name_pref"] = df["business_name"].str.replace(r"[^a-zA-Z0-9]", "", regex=True).str[:3].str.lower()
+
+    def extract_housenum(addr):
+        m = re.search(r"\d+", str(addr))
+        return m.group(0) if m else ""
+    df["addr_housenum"] = df["business_address"].apply(extract_housenum)
+    df["name_last_token"] = tokens.str[-1].fillna("")
+    df["name_soundex"] = df["business_name"].apply(lambda x: jellyfish.soundex(str(x).split()[0]) if str(x).strip() else "")
+
+    return df
+
+s1 = load_and_prep("test_source1.tsv")
+s2 = load_and_prep("test_source2.tsv")
+s3 = load_and_prep("test_source3.tsv")
+
+print(f"S1 test entities: {len(s1):,}")
+print(f"Distinct countries in test S1: {sorted(s1['country'].unique())}")  # sanity check — France should appear here
+
+# =================================================================
+# 2. FACTORIZATION (test IDs are independent of train IDs)
+# =================================================================
+print("\nFactorizing test IDs to int32...")
+all_ids = pd.concat([s1["entity_id"], s2["entity_id"], s3["entity_id"]], ignore_index=True)
+id_codes, id_uniques = pd.factorize(all_ids)
+id_map = pd.Series(id_codes, index=all_ids.values)
+
+def attach_id_code(df):
+    df["id_code"] = df["entity_id"].map(id_map).astype("int32")
+    return df
+
+s1, s2, s3 = attach_id_code(s1), attach_id_code(s2), attach_id_code(s3)
+del all_ids, id_codes
+gc.collect()
+
+# keep a lookup of ALL S1 test entity_ids — this is our master list for both output files
+ALL_S1_ENTITY_IDS = s1["entity_id"].tolist()
+s1_id_to_code = dict(zip(s1["entity_id"], s1["id_code"]))
+s1_code_to_id = dict(zip(s1["id_code"], s1["entity_id"]))
+
+# =================================================================
+# 3. SAFE JOIN FUNCTION — identical to Stage 1F
+# =================================================================
+def safe_block_join(left, right, key_cols, tag):
+    def get_valid(df):
+        m = np.ones(len(df), dtype=bool)
+        for c in key_cols:
+            vals = df[c].fillna("").astype(str).str.strip()
+            m &= (vals != "") & (vals.str.lower() != "nan") & (vals.str.lower() != "none")
+        return df[m]
+
+    left_v = get_valid(left)
+    right_v = get_valid(right)
+
+    if len(left_v) == 0 or len(right_v) == 0:
+        return pd.DataFrame({"s1_id": pd.Series(dtype='int32'), "cand_id": pd.Series(dtype='int32')})
+
+    lkey = left_v[key_cols].astype(str).agg("|".join, axis=1)
+    rkey = right_v[key_cols].astype(str).agg("|".join, axis=1)
+
+    combined = pd.concat([lkey, rkey], ignore_index=True)
+    codes, _ = pd.factorize(combined)
+    lcode = codes[:len(lkey)]
+    rcode = codes[len(lkey):]
+
+    l_ids, r_ids = left_v["id_code"].values, right_v["id_code"].values
+    l_addr, r_addr = left_v["addr_pref"].values, right_v["addr_pref"].values
+    l_namep, r_namep = left_v["name_pref"].values, right_v["name_pref"].values
+
+    l_grp = pd.Series(l_ids).groupby(lcode).apply(lambda x: x.values)
+    r_grp = pd.Series(r_ids).groupby(rcode).apply(lambda x: x.values)
+    l_addr_grp = pd.Series(l_addr).groupby(lcode).apply(lambda x: x.values)
+    r_addr_grp = pd.Series(r_addr).groupby(rcode).apply(lambda x: x.values)
+    l_name_grp = pd.Series(l_namep).groupby(lcode).apply(lambda x: x.values)
+    r_name_grp = pd.Series(r_namep).groupby(rcode).apply(lambda x: x.values)
+
+    shared_keys = np.intersect1d(l_grp.index.values, r_grp.index.values)
+
+    out_l, out_r = [], []
+    explosive_keys, refined, tertiary, dropped = 0, 0, 0, 0
+
+    for k in shared_keys:
+        lv, rv = l_grp[k], r_grp[k]
+        n1, n2 = len(lv), len(rv)
+
+        if n1 * n2 <= MAX_DIRECT_PAIRS_PER_KEY:
+            out_l.append(np.repeat(lv, n2)); out_r.append(np.tile(rv, n1))
+            continue
+
+        explosive_keys += 1
+        la, ra = l_addr_grp[k], r_addr_grp[k]
+        sub_l = pd.Series(lv).groupby(la).apply(lambda x: x.values)
+        sub_r = pd.Series(rv).groupby(pd.Series(ra)).apply(lambda x: x.values)
+
+        ln, rn = l_name_grp[k], r_name_grp[k]
+        ln_map = dict(zip(lv, ln))
+        rn_map = dict(zip(rv, rn))
+
+        for sk in np.intersect1d(sub_l.index.values, sub_r.index.values):
+            slv, srv = sub_l[sk], sub_r[sk]
+            n1s, n2s = len(slv), len(srv)
+
+            if n1s * n2s <= MAX_REFINED_PAIRS_PER_KEY:
+                out_l.append(np.repeat(slv, n2s)); out_r.append(np.tile(srv, n1s))
+                refined += n1s * n2s
+                continue
+
+            sln = np.array([ln_map[v] for v in slv])
+            srn = np.array([rn_map[v] for v in srv])
+
+            sub_l2 = pd.Series(slv).groupby(sln).apply(lambda x: x.values)
+            sub_r2 = pd.Series(srv).groupby(pd.Series(srn)).apply(lambda x: x.values)
+
+            for sk2 in np.intersect1d(sub_l2.index.values, sub_r2.index.values):
+                slv2, srv2 = sub_l2[sk2], sub_r2[sk2]
+                if len(slv2) * len(srv2) <= MAX_REFINED_PAIRS_PER_KEY:
+                    out_l.append(np.repeat(slv2, len(srv2))); out_r.append(np.tile(srv2, len(slv2)))
+                    tertiary += len(slv2) * len(srv2)
+                else:
+                    rng = np.random.default_rng(42)
+                    capped = rng.choice(srv2, size=min(HARD_CAP_PER_S1, len(srv2)), replace=False)
+                    out_l.append(np.repeat(slv2, len(capped))); out_r.append(np.tile(capped, len(slv2)))
+                    dropped += len(slv2) * (len(srv2) - len(capped))
+
+    s1_ids = np.concatenate(out_l) if out_l else np.array([], dtype="int32")
+    cand_ids = np.concatenate(out_r) if out_r else np.array([], dtype="int32")
+
+    print(f"[{tag}] shared={len(shared_keys):,} | expl={explosive_keys:,} | ref={refined:,} | tert={tertiary:,} | lost≈{dropped:,}")
+    return pd.DataFrame({"s1_id": s1_ids, "cand_id": cand_ids})
+
+# =================================================================
+# 4. EXECUTE BLOCKING ON TEST, DISK-CACHED (same schemes as Stage 1F)
+# =================================================================
+os.makedirs("/kaggle/working/temp_test_cands", exist_ok=True)
+cached_files = []
+
+schemes = [
+    (["country", "key_name2", "key_postal"], "name2_postal"),
+    (["country", "key_name1", "key_postal"], "name1_postal"),
+    (["country", "key_postal"], "postal_only"),
+    (["country", "addr_housenum"], "housenum"),
+    (["country", "name_soundex"], "soundex"),
+    (["country", "name_last_token"], "last_token"),
+]
+
+for target_df, src_tag in [(s2, "S2"), (s3, "S3")]:
+    for keys, scheme_name in schemes:
+        tag = f"{scheme_name}_{src_tag}"
+        print(f"\n--- Running {tag} ---")
+        res = safe_block_join(s1, target_df, keys, tag)
+        temp_path = f"/kaggle/working/temp_test_cands/{tag}.parquet"
+        res.to_parquet(temp_path, index=False)
+        cached_files.append(temp_path)
+        del res
+        gc.collect()
+
+# Orphan safety net — country-only fallback so NO S1 entity is silently dropped
+print("\nRunning Orphan Safety Net...")
+all_cands_so_far = [pd.read_parquet(f)["s1_id"].unique() for f in cached_files]
+matched_s1 = set(np.concatenate(all_cands_so_far)) if all_cands_so_far else set()
+all_s1_codes = set(s1["id_code"].values)
+orphans = all_s1_codes - matched_s1
+del all_cands_so_far
+gc.collect()
+
+print(f"Orphaned S1 entities (zero candidates so far): {len(orphans):,}")
+
+if orphans:
+    s1_orphan = s1[s1["id_code"].isin(orphans)]
+    for target_df, src_tag in [(s2, "S2"), (s3, "S3")]:
+        tag = f"safety_{src_tag}"
+        res = safe_block_join(s1_orphan, target_df, ["country"], tag)
+        temp_path = f"/kaggle/working/temp_test_cands/{tag}.parquet"
+        res.to_parquet(temp_path, index=False)
+        cached_files.append(temp_path)
+        del res
+        gc.collect()
+    del s1_orphan
+
+# =================================================================
+# 5. ASSEMBLE CANDIDATE PAIRS (int space, incremental to save RAM)
+# =================================================================
+print("\nAssembling test candidates (int space)...")
+candidates = None
+for f in cached_files:
+    part = pd.read_parquet(f)
+    candidates = part if candidates is None else pd.concat([candidates, part], ignore_index=True)
+    del part
+    gc.collect()
+
+candidates = candidates.drop_duplicates(subset=["s1_id", "cand_id"])
+candidates["s1_id"] = candidates["s1_id"].astype("int32")
+candidates["cand_id"] = candidates["cand_id"].astype("int32")
+print(f"Total test candidate pairs: {len(candidates):,}")
+
+# =================================================================
+# 6. FEATURE ENGINEERING — same 5 features used in training
+#    Need business_name / business_address / country text joined back in
+# =================================================================
+print("\nBuilding feature table...")
+
+s1_lookup = s1.set_index("id_code")[["business_name", "business_address", "country"]]
+s2s3 = pd.concat([s2, s3], ignore_index=True)
+r_lookup = s2s3.set_index("id_code")[["business_name", "business_address", "country"]]
+del s2s3
+gc.collect()
+
+feat = candidates.copy()
+feat = feat.join(s1_lookup.add_prefix("s1_"), on="s1_id")
+feat = feat.join(r_lookup.add_prefix("r_"), on="cand_id")
+del s1_lookup, r_lookup
+gc.collect()
+
+def jaccard(a, b):
+    sa, sb = set(str(a).lower().split()), set(str(b).lower().split())
+    if not sa and not sb:
+        return 1.0
+    if not sa or not sb:
+        return 0.0
+    return len(sa & sb) / len(sa | sb)
+
+def build_features(df, chunk_size=500_000):
+    n = len(df)
+    name_jaccard = np.zeros(n, dtype="float32")
+    name_ratio = np.zeros(n, dtype="float32")
+    addr_jaccard = np.zeros(n, dtype="float32")
+    postal_match = np.zeros(n, dtype="float32")
+    country_match = np.zeros(n, dtype="float32")
+
+    s1_name = df["s1_business_name"].values
+    r_name = df["r_business_name"].values
+    s1_addr = df["s1_business_address"].values
+    r_addr = df["r_business_address"].values
+    s1_country = df["s1_country"].astype(str).str.lower().str.strip().values
+    r_country = df["r_country"].astype(str).str.lower().str.strip().values
+
+    postal_re = re.compile(r"(\d{5,6})")
+
+    for start in range(0, n, chunk_size):
+        end = min(start + chunk_size, n)
+        for i in range(start, end):
+            name_jaccard[i] = jaccard(s1_name[i], r_name[i])
+            name_ratio[i] = fuzz.token_sort_ratio(str(s1_name[i]), str(r_name[i])) / 100.0
+            addr_jaccard[i] = jaccard(s1_addr[i], r_addr[i])
+            m1 = postal_re.search(str(s1_addr[i]))
+            m2 = postal_re.search(str(r_addr[i]))
+            postal_match[i] = 1.0 if (m1 and m2 and m1.group(1) == m2.group(1)) else 0.0
+            country_match[i] = 1.0 if s1_country[i] == r_country[i] else 0.0
+        if start % (chunk_size * 4) == 0:
+            print(f"  features {end:,}/{n:,}")
+
+    return pd.DataFrame({
+        "name_jaccard": name_jaccard,
+        "name_token_sort_ratio": name_ratio,
+        "addr_jaccard": addr_jaccard,
+        "postal_exact_match": postal_match,
+        "country_exact_match": country_match,
+    })
+
+feature_cols = build_features(feat)
+X_test = feature_cols[["name_jaccard", "name_token_sort_ratio", "addr_jaccard",
+                        "postal_exact_match", "country_exact_match"]]
+
+# =================================================================
+# 7. PREDICT WITH TRAINED MODEL
+# =================================================================
+print("\nLoading trained model and predicting...")
+model = joblib.load("/kaggle/working/xgb_matcher.pkl")  # <-- update path to your saved model
+
+probs = model.predict_proba(X_test)[:, 1]
+candidates["prob"] = probs.astype("float32")
+del feat, feature_cols, X_test, probs
+gc.collect()
+
+predicted = candidates[candidates["prob"] >= PROB_THRESHOLD].copy()
+print(f"Pairs above threshold {PROB_THRESHOLD}: {len(predicted):,} / {len(candidates):,}")
+
+# =================================================================
+# 8. AGGREGATE TO PER-S1 LISTS (candidates AND predictions)
+#    Every S1 entity gets a row, even with zero candidates/matches.
+# =================================================================
+print("\nAggregating candidate_pairs.tsv and matching_results.tsv...")
+
+def aggregate_to_dict(df, id_col, val_col):
+    """Returns {s1_code: 'ID1,ID2,...'} using entity_id strings, deduped, no self-matches."""
+    grouped = df.groupby(id_col)[val_col].apply(
+        lambda x: ",".join(sorted(set(id_uniques[v] for v in x)))
+    )
+    return grouped.to_dict()
+
+cand_map = aggregate_to_dict(candidates, "s1_id", "cand_id")
+match_map = aggregate_to_dict(predicted, "s1_id", "cand_id")
+
+# --- SUBSET-RULE SAFETY CHECK ---
+# matched IDs must always be a subset of candidate IDs for the same S1 — guaranteed here
+# because `predicted` is filtered FROM `candidates`, never generated independently.
+# Extra guard in case of any drift:
+def enforce_subset(cand_str, match_str):
+    if not match_str:
+        return match_str
+    cand_set = set(cand_str.split(",")) if cand_str else set()
+    match_set = set(match_str.split(","))
+    kept = match_set & cand_set
+    return ",".join(sorted(kept))
+
+for s1_code in list(match_map.keys()):
+    c = cand_map.get(s1_code, "")
+    match_map[s1_code] = enforce_subset(c, match_map[s1_code])
+
+# =================================================================
+# 9. BUILD FINAL DATAFRAMES — EVERY S1 TEST ENTITY MUST APPEAR
+#    Singletons / zero-candidate entities get "" -> trailing tab on write
+# =================================================================
+print("\nBuilding final output rows for ALL S1 test entities...")
+
+candidate_rows = []
+match_rows = []
+
+for entity_id, code in s1_id_to_code.items():
+    cand_str = cand_map.get(code, "")
+    match_str = match_map.get(code, "")
+    candidate_rows.append((entity_id, cand_str))
+    match_rows.append((entity_id, match_str))
+
+candidate_pairs_out = pd.DataFrame(candidate_rows, columns=["source1_entity_id", "candidate_entity_ids"])
+matching_results_out = pd.DataFrame(match_rows, columns=["source1_entity_id", "matched_entity_ids"])
+
+# sanity: row counts must equal total S1 test entities
+assert len(candidate_pairs_out) == len(ALL_S1_ENTITY_IDS)
+assert len(matching_results_out) == len(ALL_S1_ENTITY_IDS)
+assert candidate_pairs_out["source1_entity_id"].duplicated().sum() == 0
+assert matching_results_out["source1_entity_id"].duplicated().sum() == 0
+
+# =================================================================
+# 10. WRITE TSV — trailing tab for empties, no quoting, no index/header issues
+# =================================================================
+print("\nWriting TSV files...")
+
+candidate_pairs_out.to_csv(
+    f"{out_dir}/candidate_pairs.tsv", sep="\t", index=False, na_rep=""
+)
+matching_results_out.to_csv(
+    f"{out_dir}/matching_results.tsv", sep="\t", index=False, na_rep=""
+)
+
+print(f"✅ Wrote {out_dir}/candidate_pairs.tsv  ({len(candidate_pairs_out):,} rows)")
+print(f"✅ Wrote {out_dir}/matching_results.tsv ({len(matching_results_out):,} rows)")
+print(f"⏱️ Total time: {time.time() - start_time:.1f} seconds")
+
+# =================================================================
+# 11. QUICK SELF-VALIDATION (mirrors utils/validate_submission.py checks)
+# =================================================================
+print("\nRunning quick self-validation...")
+
+def quick_validate(cand_path, match_path, all_s1_ids):
+    cand_df = pd.read_csv(cand_path, sep="\t", dtype=str, keep_default_na=False)
+    match_df = pd.read_csv(match_path, sep="\t", dtype=str, keep_default_na=False)
+
+    issues = []
+    if set(cand_df["source1_entity_id"]) != set(all_s1_ids):
+        issues.append("candidate_pairs.tsv S1 coverage mismatch")
+    if set(match_df["source1_entity_id"]) != set(all_s1_ids):
+        issues.append("matching_results.tsv S1 coverage mismatch")
+
+    cand_lookup = dict(zip(cand_df["source1_entity_id"], cand_df["candidate_entity_ids"]))
+    for _, row in match_df.iterrows():
+        m_ids = set(row["matched_entity_ids"].split(",")) if row["matched_entity_ids"] else set()
+        c_ids = set(cand_lookup.get(row["source1_entity_id"], "").split(",")) if cand_lookup.get(row["source1_entity_id"], "") else set()
+        if not m_ids.issubset(c_ids):
+            issues.append(f"Subset violation for {row['source1_entity_id']}")
+            break  # don't spam
+
+    if issues:
+        print("⚠️ Issues found:", issues)
+    else:
+        print("✅ PASS — coverage complete, subset rule holds, no duplicates")
+
+quick_validate(f"{out_dir}/candidate_pairs.tsv", f"{out_dir}/matching_results.tsv", ALL_S1_ENTITY_IDS)
